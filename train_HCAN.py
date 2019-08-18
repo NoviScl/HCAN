@@ -134,6 +134,8 @@ class dreamProcessor(DataProcessor):
 					for j in range(len(data[i][1])):
 						# shouldn't do lower case, since we are using cased model 						
 						# d = ['\n'.join(data[i][0]).lower(), data[i][1][j]["question"].lower()]
+						### TO TRY: instead of use nltk to sent_tokenize the passage
+						### treat each turn of the dialogue as one sent 
 						d = ['\n'.join(data[i][0]), data[i][1][j]["question"]]
 						for k in range(len(data[i][1][j]["choice"])):
 							# d += [data[i][1][j]["choice"][k].lower()]
@@ -203,6 +205,9 @@ def convert_examples_to_features(examples, label_list, max_sent_length, max_no_s
 	pad_tok_id = 4 
 	cls_token = tokenizer.cls_token
 	sep_token = tokenizer.sep_token
+	total_sent_len = 0 
+	total_sent_no = 0
+	total_question = 0  
 
 	print("#examples:", len(examples))
 
@@ -215,9 +220,13 @@ def convert_examples_to_features(examples, label_list, max_sent_length, max_no_s
 		# break passage into sentences 
 		text_a = example.text_a
 		sent_text_a = nltk.sent_tokenize(text_a)
+		total_question += 1
+		total_sent_no += len(sent_text_a)
 		tokens_p = []
 		for sent in sent_text_a:
-			tokens_p.append(tokenizer.tokenize(sent))
+			sent_tok = tokenizer.tokenize(sent)
+			total_sent_len += len(sent_tok)
+			tokens_p.append(sent_tok)
 		# tokens_a = tokenizer.tokenize(example.text_a)
 
 		tokens_q = None
@@ -268,7 +277,7 @@ def convert_examples_to_features(examples, label_list, max_sent_length, max_no_s
 		# 	tokens.append(sep_token)
 		# 	segment_ids.append(1)
 
-		## add [CLS] token at the end
+		## add [SEP] [CLS] token at the end
 		## make segment_ids and attention_mask for P, Q, O 
 		p_input_ids = []
 		p_input_mask = []
@@ -281,6 +290,8 @@ def convert_examples_to_features(examples, label_list, max_sent_length, max_no_s
 		o_segment_ids = [] 
 		for i in range(len(tokens_p)):
 			sent_segment_ids = [0]*len(tokens_p[i])
+			tokens_p[i].append(sep_token)
+			sent_segment_ids.append(0)
 			tokens_p[i].append(cls_token)
 			sent_segment_ids.append(cls_tok_id)
 			sent_input_mask = [1]*len(tokens_p[i])
@@ -288,12 +299,16 @@ def convert_examples_to_features(examples, label_list, max_sent_length, max_no_s
 			p_input_mask.append(sent_input_mask)
 			p_input_ids.append(tokenizer.convert_tokens_to_ids(tokens_p[i]))
 		q_segment_ids = [0]*len(tokens_q)
+		tokens_q.append(sep_token)
+		q_segment_ids.append(0)
 		tokens_q.append(cls_token)
 		q_segment_ids.append(cls_tok_id)
 		q_input_mask = [1]*len(tokens_q)
 		q_input_ids = tokenizer.convert_tokens_to_ids(tokens_q)
 
 		o_segment_ids = [0]*len(tokens_o)
+		tokens_o.append(sep_token)
+		o_segment_ids.append(0)
 		tokens_o.append(cls_token)
 		o_segment_ids.append(cls_tok_id)
 		o_input_mask = [1]*len(tokens_o)
@@ -332,8 +347,10 @@ def convert_examples_to_features(examples, label_list, max_sent_length, max_no_s
 			padding_length = max_no_sent - len(tokens_p)
 			pad_sent = [0]*max_sent_length
 			pad_segment_ids = [pad_tok_id]*max_sent_length
-			p_input_ids = [[pad_sent]]*padding_length + p_input_ids
-			p_input_mask = [[pad_sent]]*padding_length + p_input_mask
+			p_input_ids = [pad_sent]*padding_length + p_input_ids
+			# if len(p_input_ids) != max_sent_length:
+			# 	print (p_input_ids)
+			p_input_mask = [pad_sent]*padding_length + p_input_mask
 			p_segment_ids = [pad_segment_ids]*padding_length + p_segment_ids 
 
 		padding_length = max_sent_length - len(tokens_q)
@@ -351,7 +368,7 @@ def convert_examples_to_features(examples, label_list, max_sent_length, max_no_s
 		assert len(p_input_mask) == max_no_sent
 		assert len(p_segment_ids) == max_no_sent
 		for sent in p_input_ids:
-			assert len(sent) == max_sent_length
+			assert len(sent) == max_sent_length, 'Wrong len: '+str(len(sent))
 		for sent in p_input_mask:
 			assert len(sent) == max_sent_length
 		for sent in p_segment_ids:
@@ -380,7 +397,7 @@ def convert_examples_to_features(examples, label_list, max_sent_length, max_no_s
 			logger.info("question input_ids: %s" % " ".join([str(x) for x in q_input_ids]))
 			logger.info("question input_mask: %s" % " ".join([str(x) for x in q_input_mask]))
 			logger.info(
-					"passage segment_ids: %s" % " ".join([str(x) for x in q_segment_ids]))
+					"question segment_ids: %s" % " ".join([str(x) for x in q_segment_ids]))
 			
 			logger.info("option tokens: %s" % " ".join(
 					[str(x) for x in tokens_o]))
@@ -392,13 +409,13 @@ def convert_examples_to_features(examples, label_list, max_sent_length, max_no_s
 
 		features[-1].append(
 				InputFeatures(
-						p_input_ids=tokens_p,
+						p_input_ids=p_input_ids,
 						p_input_mask=p_input_mask,
 						p_segment_ids=p_segment_ids,
-						q_input_ids=tokens_q,
+						q_input_ids=q_input_ids,
 						q_input_mask=q_input_mask,
 						q_segment_ids=q_segment_ids,
-						o_input_ids=tokens_o,
+						o_input_ids=o_input_ids,
 						o_input_mask=o_input_mask,
 						o_segment_ids=o_segment_ids,
 						label_id=label_id))
@@ -410,6 +427,8 @@ def convert_examples_to_features(examples, label_list, max_sent_length, max_no_s
 	if len(features[-1]) == 0:
 		features = features[:-1]
 	print('#features', len(features))
+	print ('avg no of sents per passage:', total_sent_no/total_question)
+	print ('avg sent length:', total_sent_len/total_sent_no)
 	return features
 
 
@@ -658,6 +677,10 @@ def main():
 			o_segment_ids.append([])
 			for i in range(num_choices):
 				## put three input sequences tgt 
+				# for sent in f[i].p_input_ids:
+				# 	for x in sent:
+				# 		if type(x) == str:
+				# 			print ("Wrong type :", print (sent))
 				p_input_ids[-1].append(f[i].p_input_ids)
 				p_input_mask[-1].append(f[i].p_input_mask)
 				p_segment_ids[-1].append(f[i].p_segment_ids)
@@ -704,14 +727,14 @@ def main():
 				p_input_ids, p_input_mask, p_segment_ids, q_input_ids, q_input_mask, q_segment_ids, o_input_ids, o_input_mask, o_segment_ids, label_ids = batch
 				loss, _ = model(passage_input=(p_input_ids, p_segment_ids, p_input_mask), 
 					question_input=(q_input_ids, q_segment_ids, q_input_mask), 
-					option_input=(o_input_ids, o_segment_ids, o_input_mask), labels=label_ids, n_class=num_choices)
+					option_input=(o_input_ids, o_segment_ids, o_input_mask), labels=label_ids)
 				if n_gpu > 1:
 					loss = loss.mean() # mean() to average on multi-gpu.
 				if args.gradient_accumulation_steps > 1:
 					loss = loss / args.gradient_accumulation_steps
 				loss.backward()
 				tr_loss += loss.item()
-				nb_tr_examples += input_ids.size(0)
+				nb_tr_examples += p_input_ids.size(0)
 				nb_tr_steps += 1
 				
 				if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -811,7 +834,7 @@ def main():
 					with torch.no_grad():
 						tmp_eval_loss, logits = model(passage_input=(p_input_ids, p_segment_ids, p_input_mask), 
 													question_input=(q_input_ids, q_segment_ids, q_input_mask), 
-													option_input=(o_input_ids, o_segment_ids, o_input_mask), labels=label_ids, n_class=num_choices)
+													option_input=(o_input_ids, o_segment_ids, o_input_mask), labels=label_ids)
 
 					logits = logits.detach().cpu().numpy()
 					label_ids = label_ids.to('cpu').numpy()
@@ -823,7 +846,7 @@ def main():
 					eval_loss += tmp_eval_loss.mean().item()
 					eval_accuracy += tmp_eval_accuracy
 
-					nb_eval_examples += input_ids.size(0)
+					nb_eval_examples += p_input_ids.size(0)
 					nb_eval_steps += 1
 
 				eval_loss = eval_loss / nb_eval_steps
