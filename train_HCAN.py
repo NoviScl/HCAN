@@ -1,8 +1,8 @@
-import HCAN 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import HCAN 
 import csv
 import os
 import logging
@@ -22,6 +22,8 @@ from modeling_xlnet import XLNetConfig, XLNetForSequenceClassification
 from optimization import AdamW, WarmupLinearSchedule
 from file_utils import PYTORCH_PRETRAINED_BERT_CACHE
 import nltk 
+
+import json 
 
 
 logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s', 
@@ -93,6 +95,27 @@ class DataProcessor(object):
 			for line in reader:
 				lines.append(line)
 			return lines
+
+# convert to unicode just in case the original data is not 
+def convert_to_unicode(text):
+	"""Converts `text` to Unicode (if it's not already), assuming utf-8 input."""
+	if six.PY3:
+		if isinstance(text, str):
+			return text
+		elif isinstance(text, bytes):
+			return text.decode("utf-8", "ignore")
+		else:
+			raise ValueError("Unsupported string type: %s" % (type(text)))
+	elif six.PY2:
+		if isinstance(text, str):
+			return text.decode("utf-8", "ignore")
+		elif isinstance(text, unicode):
+			return text
+		else:
+			raise ValueError("Unsupported string type: %s" % (type(text)))
+	else:
+		raise ValueError("Not running on Python2 or Python 3?")
+
 
 
 ## TODO: RACE processor 
@@ -221,7 +244,7 @@ def convert_examples_to_features(examples, label_list, max_sent_length, max_no_s
 		## truncate
 		if len(tokens_q) > max_sent_length - 2:
 			tokens_q = tokens_q[0:(max_sent_length - 2)]
-		if len(tokens_o) > max_sent_length - 2::
+		if len(tokens_o) > max_sent_length - 2:
 			tokens_o = tokens_o[0:(max_sent_length - 2)]
 		for i in range(len(tokens_p)):
 			if len(tokens_p[i]) > max_sent_length - 2:
@@ -302,6 +325,17 @@ def convert_examples_to_features(examples, label_list, max_sent_length, max_no_s
 			p_input_ids[i] = ([0]*padding_length) + p_input_ids[i]
 			p_input_mask[i] = ([0]*padding_length) + p_input_mask[i]
 			p_segment_ids[i] = ([pad_tok_id]*padding_length) + p_segment_ids[i]
+		## pad empty sentences to reach max_no_sent
+		## pad in front 
+		## pad sentences are just sentences with all padding tokens 
+		if len(tokens_p) < max_no_sent:
+			padding_length = max_no_sent - len(tokens_p)
+			pad_sent = [0]*max_sent_length
+			pad_segment_ids = [pad_tok_id]*max_sent_length
+			p_input_ids = [[pad_sent]]*padding_length + p_input_ids
+			p_input_mask = [[pad_sent]]*padding_length + p_input_mask
+			p_segment_ids = [pad_segment_ids]*padding_length + p_segment_ids 
+
 		padding_length = max_sent_length - len(tokens_q)
 		q_input_ids = ([0]*padding_length) + q_input_ids
 		q_input_mask = ([0]*padding_length) + q_input_mask
@@ -313,10 +347,22 @@ def convert_examples_to_features(examples, label_list, max_sent_length, max_no_s
 		o_segment_ids = ([pad_tok_id]*padding_length) + o_segment_ids
 
 
-		# assert len(input_ids) == max_seq_length
-		# assert len(input_mask) == max_seq_length
-		# assert len(segment_ids) == max_seq_length
-
+		assert len(p_input_ids) == max_no_sent 
+		assert len(p_input_mask) == max_no_sent
+		assert len(p_segment_ids) == max_no_sent
+		for sent in p_input_ids:
+			assert len(sent) == max_sent_length
+		for sent in p_input_mask:
+			assert len(sent) == max_sent_length
+		for sent in p_segment_ids:
+			assert len(sent) == max_sent_length
+		assert len(q_input_ids) == max_sent_length
+		assert len(q_input_mask) == max_sent_length
+		assert len(q_segment_ids) == max_sent_length
+		assert len(o_input_ids) == max_sent_length
+		assert len(o_input_mask) == max_sent_length
+		assert len(o_segment_ids) == max_sent_length
+		
 		## Print some examples 
 		label_id = label_map[example.label]
 		if ex_index < 5:
@@ -367,7 +413,6 @@ def convert_examples_to_features(examples, label_list, max_sent_length, max_no_s
 	return features
 
 
-
 def accuracy(out, labels):
 	outputs = np.argmax(out, axis=1)
 	return np.sum(outputs==labels)
@@ -395,12 +440,26 @@ def main():
 
 
 	## Other parameters
-	parser.add_argument("--max_seq_length",
-						default=512,
+	parser.add_argument("--task",
+						default="dream",
+						type=str,
+						help="The dataset used. Either race or dream.")
+	parser.add_argument("--max_no_sent",
+						default=20,
 						type=int,
-						help="The maximum total input sequence length after WordPiece tokenization. \n"
-							 "Sequences longer than this will be truncated, and sequences shorter \n"
-							 "than this will be padded.")
+						help="The max number of sentences.")
+	parser.add_argument("--max_sent_len",
+						default=20,
+						type=int,
+						help="The max number of tokens in a sentence.")
+	parser.add_argument("--d_model",
+						default=1024,
+						type=int,
+						help="The hidden size of XLnet.")
+	parser.add_argument("--d_model",
+						default=1024,
+						type=int,
+						help="The hidden size of LSTM.")
 	parser.add_argument("--do_train",
 						default=False,
 						action='store_true',
@@ -504,9 +563,16 @@ def main():
 			len(train_examples) / n_class / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
 
 	## prepare model   
-	model = XLNetForSequenceClassification.from_pretrained(args.xlnet_model,
-		cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / 'distributed_{}'.format(args.local_rank),
-		num_choices=3)
+	# model = XLNetForSequenceClassification.from_pretrained(args.xlnet_model,
+	# 	cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / 'distributed_{}'.format(args.local_rank),
+	# 	num_choices=3)
+	# model.to(device)
+	if args.task == 'dream':
+		num_choices = 3
+	elif args.task == 'race':
+		num_choices = 4 
+
+	model = HCAN(args, num_choices)
 	model.to(device)
 
 	if args.local_rank != -1:
@@ -555,42 +621,72 @@ def main():
 		scheduler = WarmupLinearSchedule(optimizer, warmup_steps=warmup_steps, t_total=t_total)
 
 
-
 	global_step = 0
 	if args.do_train:
 		train_features = convert_examples_to_features(
-			train_examples, label_list, args.max_seq_length, tokenizer)
+			train_examples, label_list, args.max_sent_len, args.max_no_sent, tokenizer, n_opt=num_choices)
 		logger.info("***** Running training *****")
 		logger.info("  Num examples = %d", len(train_examples))
 		logger.info("  Batch size = %d", args.train_batch_size)
 		logger.info("  Num steps = %d", num_train_steps)
 
-		input_ids = []
-		input_mask = []
-		segment_ids = []
+		p_input_ids = []
+		p_input_mask = []
+		p_segment_ids = []
+		q_input_ids = []
+		q_input_mask = []
+		q_segment_ids = []
+		o_input_ids = []
+		o_input_mask = []
+		o_segment_ids = []
 		label_id = []
 		for f in train_features:
-			input_ids.append([])
-			input_mask.append([])
-			segment_ids.append([])
-			for i in range(n_class):
+			p_input_ids.append([])
+			p_input_mask.append([])
+			p_segment_ids.append([])
+			q_input_ids.append([])
+			q_input_mask.append([])
+			q_segment_ids.append([])
+			o_input_ids.append([])
+			o_input_mask.append([])
+			o_segment_ids.append([])
+			for i in range(num_choices):
 				## put three input sequences tgt 
-				input_ids[-1].append(f[i].input_ids)
-				input_mask[-1].append(f[i].input_mask)
-				segment_ids[-1].append(f[i].segment_ids)
+				p_input_ids[-1].append(f[i].p_input_ids)
+				p_input_mask[-1].append(f[i].p_input_mask)
+				p_segment_ids[-1].append(f[i].p_segment_ids)
+				q_input_ids[-1].append(f[i].q_input_ids)
+				q_input_mask[-1].append(f[i].q_input_mask)
+				q_segment_ids[-1].append(f[i].q_segment_ids)
+				o_input_ids[-1].append(f[i].o_input_ids)
+				o_input_mask[-1].append(f[i].o_input_mask)
+				o_segment_ids[-1].append(f[i].o_segment_ids)
 			label_id.append([f[0].label_id])                
 
-		all_input_ids = torch.tensor(input_ids, dtype=torch.long)
-		all_input_mask = torch.tensor(input_mask, dtype=torch.long)
-		all_segment_ids = torch.tensor(segment_ids, dtype=torch.long)
+		all_p_input_ids = torch.tensor(p_input_ids, dtype=torch.long)
+		all_p_input_mask = torch.tensor(p_input_mask, dtype=torch.long)
+		all_p_segment_ids = torch.tensor(p_segment_ids, dtype=torch.long)
+		
+		all_q_input_ids = torch.tensor(q_input_ids, dtype=torch.long)
+		all_q_input_mask = torch.tensor(q_input_mask, dtype=torch.long)
+		all_q_segment_ids = torch.tensor(q_segment_ids, dtype=torch.long)
+		
+		all_o_input_ids = torch.tensor(o_input_ids, dtype=torch.long)
+		all_o_input_mask = torch.tensor(o_input_mask, dtype=torch.long)
+		all_o_segment_ids = torch.tensor(o_segment_ids, dtype=torch.long)
 		all_label_ids = torch.tensor(label_id, dtype=torch.long)
 
-		train_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+		train_data = TensorDataset(all_p_input_ids, all_p_input_mask, all_p_segment_ids, 
+			all_q_input_ids, all_q_input_mask, all_q_segment_ids, 
+			all_o_input_ids, all_o_input_mask, all_o_segment_ids, all_label_ids)
 		if args.local_rank == -1:
 			train_sampler = RandomSampler(train_data)
 		else:
 			train_sampler = DistributedSampler(train_data)
 		train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
+
+		## Input Shape: P: (bsz, num_choices, max_no_sent, max_sent_len)
+		## Q & O: (bsz, num_choices, max_sent_len)
 
 		model.train()
 		for ep in range(int(args.num_train_epochs)):
@@ -599,8 +695,10 @@ def main():
 			nb_tr_examples, nb_tr_steps = 0, 0
 			for step, batch in enumerate(train_dataloader):
 				batch = tuple(t.to(device) for t in batch)
-				input_ids, input_mask, segment_ids, label_ids = batch
-				loss, _, _ = model(input_ids=input_ids, token_type_ids=segment_ids, attention_mask=input_mask, labels=label_ids, n_class=n_class)
+				p_input_ids, p_input_mask, p_segment_ids, q_input_ids, q_input_mask, q_segment_ids, o_input_ids, o_input_mask, o_segment_ids, label_ids = batch
+				loss, _ = model(passage_input=(p_input_ids, p_segment_ids, p_input_mask), 
+					question_input=(q_input_ids, q_segment_ids, q_input_mask), 
+					option_input=(o_input_ids, o_segment_ids, o_input_mask), labels=label_ids, n_class=num_choices)
 				if n_gpu > 1:
 					loss = loss.mean() # mean() to average on multi-gpu.
 				if args.gradient_accumulation_steps > 1:
@@ -623,33 +721,62 @@ def main():
 			if args.do_eval:
 				eval_examples = processor.get_dev_examples(args.data_dir)
 				eval_features = convert_examples_to_features(
-					eval_examples, label_list, args.max_seq_length, tokenizer)
+					eval_examples, label_list, args.max_sent_len, args.max_no_sent, tokenizer, n_opt=num_choices)
 
 				logger.info("***** Running Dev Evaluation *****")
 				logger.info("  Num examples = %d", len(eval_examples))
 				logger.info("  Batch size = %d", args.eval_batch_size)
 
-				input_ids = []
-				input_mask = []
-				segment_ids = []
+				p_input_ids = []
+				p_input_mask = []
+				p_segment_ids = []
+				q_input_ids = []
+				q_input_mask = []
+				q_segment_ids = []
+				o_input_ids = []
+				o_input_mask = []
+				o_segment_ids = []
 				label_id = []
-				
 				for f in eval_features:
-					input_ids.append([])
-					input_mask.append([])
-					segment_ids.append([])
-					for i in range(n_class):
-						input_ids[-1].append(f[i].input_ids)
-						input_mask[-1].append(f[i].input_mask)
-						segment_ids[-1].append(f[i].segment_ids)
+					p_input_ids.append([])
+					p_input_mask.append([])
+					p_segment_ids.append([])
+					q_input_ids.append([])
+					q_input_mask.append([])
+					q_segment_ids.append([])
+					o_input_ids.append([])
+					o_input_mask.append([])
+					o_segment_ids.append([])
+					for i in range(num_choices):
+						## put three input sequences tgt 
+						p_input_ids[-1].append(f[i].p_input_ids)
+						p_input_mask[-1].append(f[i].p_input_mask)
+						p_segment_ids[-1].append(f[i].p_segment_ids)
+						q_input_ids[-1].append(f[i].q_input_ids)
+						q_input_mask[-1].append(f[i].q_input_mask)
+						q_segment_ids[-1].append(f[i].q_segment_ids)
+						o_input_ids[-1].append(f[i].o_input_ids)
+						o_input_mask[-1].append(f[i].o_input_mask)
+						o_segment_ids[-1].append(f[i].o_segment_ids)
 					label_id.append([f[0].label_id])                
 
-				all_input_ids = torch.tensor(input_ids, dtype=torch.long)
-				all_input_mask = torch.tensor(input_mask, dtype=torch.long)
-				all_segment_ids = torch.tensor(segment_ids, dtype=torch.long)
+				all_p_input_ids = torch.tensor(p_input_ids, dtype=torch.long)
+				all_p_input_mask = torch.tensor(p_input_mask, dtype=torch.long)
+				all_p_segment_ids = torch.tensor(p_segment_ids, dtype=torch.long)
+				
+				all_q_input_ids = torch.tensor(q_input_ids, dtype=torch.long)
+				all_q_input_mask = torch.tensor(q_input_mask, dtype=torch.long)
+				all_q_segment_ids = torch.tensor(q_segment_ids, dtype=torch.long)
+				
+				all_o_input_ids = torch.tensor(o_input_ids, dtype=torch.long)
+				all_o_input_mask = torch.tensor(o_input_mask, dtype=torch.long)
+				all_o_segment_ids = torch.tensor(o_segment_ids, dtype=torch.long)
 				all_label_ids = torch.tensor(label_id, dtype=torch.long)
 
-				eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+				eval_data = TensorDataset(all_p_input_ids, all_p_input_mask, all_p_segment_ids, 
+					all_q_input_ids, all_q_input_mask, all_q_segment_ids, 
+					all_o_input_ids, all_o_input_mask, all_o_segment_ids, all_label_ids)
+
 				if args.local_rank == -1:
 					eval_sampler = SequentialSampler(eval_data)
 				else:
@@ -660,14 +787,25 @@ def main():
 				eval_loss, eval_accuracy = 0, 0
 				nb_eval_steps, nb_eval_examples = 0, 0
 				logits_all = []
-				for input_ids, input_mask, segment_ids, label_ids in eval_dataloader:
-					input_ids = input_ids.to(device)
-					input_mask = input_mask.to(device)
-					segment_ids = segment_ids.to(device)
+				for p_input_ids, p_input_mask, p_segment_ids, q_input_ids, q_input_mask, q_segment_ids, o_input_ids, o_input_mask, o_segment_ids, label_ids in eval_dataloader:
+					p_input_ids = p_input_ids.to(device)
+					p_input_mask = p_input_mask.to(device)
+					p_segment_ids = p_segment_ids.to(device)
+						
+					q_input_ids = q_input_ids.to(device)
+					q_input_mask = q_input_mask.to(device)
+					q_segment_ids = q_segment_ids.to(device)
+
+					o_input_ids = o_input_ids.to(device)
+					o_input_mask = o_input_mask.to(device)
+					o_segment_ids = o_segment_ids.to(device)
+
 					label_ids = label_ids.to(device)
 
 					with torch.no_grad():
-						tmp_eval_loss, logits, _ = model(input_ids=input_ids, token_type_ids=segment_ids, attention_mask=input_mask, labels=label_ids, n_class=n_class)
+						tmp_eval_loss, logits = model(passage_input=(p_input_ids, p_segment_ids, p_input_mask), 
+													question_input=(q_input_ids, q_segment_ids, q_input_mask), 
+													option_input=(o_input_ids, o_segment_ids, o_input_mask), labels=label_ids, n_class=num_choices)
 
 					logits = logits.detach().cpu().numpy()
 					label_ids = label_ids.to('cpu').numpy()
