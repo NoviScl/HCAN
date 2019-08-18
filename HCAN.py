@@ -1,3 +1,22 @@
+import csv
+import os
+import logging
+import argparse
+import random
+from tqdm import tqdm, trange
+import apex 
+import six 
+
+import numpy as np
+import torch
+from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
+from torch.utils.data.distributed import DistributedSampler
+
+from tokenization_xlnet import XLNetTokenizer
+from modeling_xlnet import XLNetConfig, XLNetForSequenceClassification
+from optimization import AdamW, WarmupLinearSchedule
+from file_utils import PYTORCH_PRETRAINED_BERT_CACHE
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -11,7 +30,7 @@ from torch.nn import CrossEntropyLoss, MSELoss
 # Co-Attention LSTM
 class CA_LSTM(nn.Module):
 	# incorporate Question and Option as attention of Passage LSTM 
-	def __init__(self, in_dim, out_dim, batch_first=True, bidirectional=True, dropoutP=0.3):
+	def __init__(self, in_dim, out_dim, layers=1, batch_first=True, bidirectional=True, dropoutP=0.3):
 		# input shape should be batch_first 
 		# p, q, o input should all have in_dim  
 		super(CA_LSTM, self).__init__()
@@ -86,14 +105,14 @@ class HCAN(nn.Module):
 		for param in self.sent_xlnet.parameters():
 			param.requires_grad = False
 
-		self.sent_lstm = CA_LSTM(args.d_model, args.d_lstm)
-		self.para_lstm = CA_LSTM(2*args.d_lstm, 2*args.d_lstm)
+		self.sent_lstm = CA_LSTM(args.d_model, args.d_lstm, layers=args.lstm_layers)
+		self.para_lstm = CA_LSTM(2*args.d_lstm, 2*args.d_lstm, layers=args.lstm_layers)
 
 		self.sent_linear = nn.Linear(2*args.d_lstm, 2*args.d_lstm)
 		self.sent_proj = nn.Linear(2*args.d_lstm, 1)
 
 		self.para_linear = nn.Linear(4*args.d_lstm, 4*args.d_lstm)
-		self.para_proj = nn.para_proj(4*args.d_lstm, 1)
+		self.para_proj = nn.Linear(4*args.d_lstm, 1)
 
 		self.final_proj = nn.Linear(4*args.d_lstm, 1)
 

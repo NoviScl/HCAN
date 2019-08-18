@@ -2,7 +2,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import HCAN 
+from HCAN import *
 import csv
 import os
 import logging
@@ -120,13 +120,13 @@ def convert_to_unicode(text):
 
 ## TODO: RACE processor 
 class dreamProcessor(DataProcessor):
-	def __init__(self):
+	def __init__(self, data_dir):
 		random.seed(42)
 		self.D = [[], [], []]
 
 		for sid in range(3):
 			## Note: assuming data folder stored in the same directory 
-			with open(["data/train.json", "data/dev.json", "data/test.json"][sid], "r") as f:
+			with open([data_dir+"/train.json", data_dir+"/dev.json", data_dir+"/test.json"][sid], "r") as f:
 				data = json.load(f)
 				if sid == 0:
 					random.shuffle(data)
@@ -456,10 +456,14 @@ def main():
 						default=1024,
 						type=int,
 						help="The hidden size of XLnet.")
-	parser.add_argument("--d_model",
+	parser.add_argument("--d_lstm",
 						default=1024,
 						type=int,
 						help="The hidden size of LSTM.")
+	parser.add_argument("--lstm_layers",
+						default=1,
+						type=int,
+						help="LSTM layers for the Hierarchical Model")
 	parser.add_argument("--do_train",
 						default=False,
 						action='store_true',
@@ -521,8 +525,14 @@ def main():
 	args = parser.parse_args()
 
 
-	processor = dreamProcessor()
+	processor = dreamProcessor(args.data_dir)
 	label_list = processor.get_labels()
+
+	# num_choices = n_class
+	if args.task == 'dream':
+		num_choices = n_class =  3
+	elif args.task == 'race':
+		num_choices = n_class = 4 
 
 	if args.local_rank == -1 or args.no_cuda:
 		device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
@@ -567,11 +577,7 @@ def main():
 	# 	cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / 'distributed_{}'.format(args.local_rank),
 	# 	num_choices=3)
 	# model.to(device)
-	if args.task == 'dream':
-		num_choices = 3
-	elif args.task == 'race':
-		num_choices = 4 
-
+	
 	model = HCAN(args, num_choices)
 	model.to(device)
 
