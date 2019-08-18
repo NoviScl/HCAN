@@ -717,8 +717,8 @@ def main():
 		## Input Shape: P: (bsz, num_choices, max_no_sent, max_sent_len)
 		## Q & O: (bsz, num_choices, max_sent_len)
 
-		model.train()
 		for ep in range(int(args.num_train_epochs)):
+			model.train()
 			max_score = 0 
 			tr_loss = 0
 			nb_tr_examples, nb_tr_steps = 0, 0
